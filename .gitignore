@@ -1,3 +1,4 @@
 chave
 .embedding_cache
 __pycache__
+.csv
