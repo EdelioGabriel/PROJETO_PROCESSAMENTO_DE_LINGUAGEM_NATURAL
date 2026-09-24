@@ -830,32 +830,44 @@ def avaliar_prompt_no_conjunto(client: OpenAI, prompt_texto: str,
 def _carregar_checkpoint(saida_dir: Path):
     """Procura, em `saida_dir`, o checkpoint de uma rodada anterior (e
     possivelmente interrompida) de `otimizar`: `historico.json` casado com
-    o `beam_apos_passo_N.json` do ultimo passo registrado.
+    o `beam_apos_passo_N.json` do ultimo passo registrado, mais a
+    trajetoria (`candidatos.json`) se existir.
 
     Se `beam_apos_passo_N.json` nao existir (rodada de uma versao anterior
     a essa funcionalidade, que so salvava o VENCEDOR de cada passo em
     `passo_N_melhor_prompt.txt`, nao o beam inteiro), cai para um resumo
     DEGRADADO: reconstroi um beam de tamanho 1 a partir desse vencedor, e
     ainda assim retoma dali -- perde a diversidade dos outros prompts do
-    beam antigo, mas reaproveita o progresso principal (nao refaz os
+    beam antigo E a linhagem (pais/passo de criacao) desse prompt na
+    trajetoria, mas reaproveita o progresso principal (nao refaz os
     passos ja feitos do zero).
 
-    Devolve (historico, beam, ultimo_passo, degradado: bool). Se nao
-    houver historico.json, se ele estiver vazio, ou se nem o beam nem o
-    .txt do vencedor existirem, devolve ([], None, 0, False), sinalizando
-    "comecar do zero"."""
+    Devolve um dict {historico, beam, ultimo_passo, degradado, trajetoria,
+    chamadas_metrica}, ou None se nao houver nada pra retomar (sem
+    historico.json, ou historico.json vazio). Levanta RuntimeError se
+    achar historico.json com passos registrados mas nem o beam nem o
+    vencedor do ultimo passo existirem -- para nao arriscar sobrescrever
+    esse historico silenciosamente."""
     historico_path = saida_dir / "historico.json"
     if not historico_path.exists():
-        return [], None, 0, False
+        return None
     historico = json.loads(historico_path.read_text(encoding="utf-8"))
     if not historico:
-        return [], None, 0, False
+        return None
     ultimo_passo = historico[-1]["passo"]
+
+    trajetoria, chamadas_metrica = [], 0
+    candidatos_path = saida_dir / "candidatos.json"
+    if candidatos_path.exists():
+        dados = json.loads(candidatos_path.read_text(encoding="utf-8"))
+        trajetoria = dados.get("candidatas", [])
+        chamadas_metrica = dados.get("chamadas_metrica", 0)
 
     beam_path = saida_dir / f"beam_apos_passo_{ultimo_passo}.json"
     if beam_path.exists():
         beam = json.loads(beam_path.read_text(encoding="utf-8"))
-        return historico, beam, ultimo_passo, False
+        return {"historico": historico, "beam": beam, "ultimo_passo": ultimo_passo,
+                "degradado": False, "trajetoria": trajetoria, "chamadas_metrica": chamadas_metrica}
 
     melhor_path = saida_dir / f"passo_{ultimo_passo}_melhor_prompt.txt"
     if melhor_path.exists():
@@ -863,10 +875,12 @@ def _carregar_checkpoint(saida_dir: Path):
               f"{beam_path.name} nao existe (checkpoint de uma versao anterior a "
               f"esta funcionalidade) -- retomando em modo DEGRADADO: o beam vai "
               f"reiniciar so com o vencedor salvo em {melhor_path.name}, perdendo "
-              f"a diversidade dos outros prompts do beam antigo, mas sem refazer "
-              f"os {ultimo_passo} passo(s) ja feitos.")
+              f"a diversidade dos outros prompts do beam antigo E a linhagem desse "
+              f"prompt na trajetoria (vai aparecer como um no novo, sem pais), mas "
+              f"sem refazer os {ultimo_passo} passo(s) ja feitos.")
         beam = [melhor_path.read_text(encoding="utf-8")]
-        return historico, beam, ultimo_passo, True
+        return {"historico": historico, "beam": beam, "ultimo_passo": ultimo_passo,
+                "degradado": True, "trajetoria": trajetoria, "chamadas_metrica": chamadas_metrica}
 
     print(f"  [aviso] {historico_path.name} tem {ultimo_passo} passo(s), mas nem "
           f"{beam_path.name} nem {melhor_path.name} existem -- nao ha nada pra "
@@ -885,32 +899,55 @@ def otimizar_protegi(client: OpenAI,
                       saida_dir: Path,
                       passos: int = 4, beam_width: int = 3,
                       num_gradientes: int = 2, num_edicoes: int = 2,
-                      tamanho_minibatch: int = 10, retomar: bool = True) -> str:
+                      tamanho_minibatch: int = 10, retomar: bool = True,
+                      nome_inicial: str = "p0_ingenuo") -> str:
     """Loop principal do ProTeGi (Algoritmo 1 do paper), simplificado:
       - beam de tamanho beam_width, iniciando com [PROMPT_APO_INICIAL]
       - a cada passo: expande cada prompt do beam (gradiente -> edicoes)
         usando os erros no minibatch de TREINO, avalia todos os
         candidatos nesse mesmo minibatch e mantem os beam_width melhores
         por F1 de deteccao (TopK greedy, sem bandit -- suficiente para o
-        volume pequeno de dados deste projeto);
-      - ao final de cada passo, o prompt vencedor tambem e avaliado na
-        VALIDACAO inteira (so para log -- nunca influencia a selecao).
+        volume pequeno de dados deste projeto).
 
-    `tamanho_minibatch=None` (padrao) usa o TREINO INTEIRO a cada passo:
-    com so 60 abstracts de treino, o custo de um passo full-batch ja e
-    pequeno e evita ruido extra de amostragem; passe um inteiro menor que
-    len(abstracts_treino) para usar minibatches parciais como no ProTeGi
-    original.
+    `tamanho_minibatch=None` usa o TREINO INTEIRO a cada passo; passe um
+    inteiro menor que len(abstracts_treino) para minibatches parciais.
 
-    Salva um `historico.json` detalhado (metricas de CADA candidato
-    avaliado a cada passo, do vencedor no treino e na validacao), pensado
-    para permitir plots externos sem precisar rodar o script de novo, e
-    devolve o texto do prompt final.
+    Alem do `historico.json` (log por passo, ja existente), salva
+    `candidatos.json` com a TRAJETORIA completa da busca, no formato
+    esperado por scripts de analise externos (ex. `analisar.py`/GEPA):
+
+        {"inicial": nome_inicial, "melhor": <indice>,
+         "chamadas_metrica": <int>,
+         "candidatas": [{"indice", "pais", "passo", "no_beam",
+                          "nota_val", "nota_treino", "chamadas_ate_aqui",
+                          "instrucoes"}, ...]}
+
+    Cada prompt DISTINTO vira um no, registrado so na PRIMEIRA vez que
+    aparece (a raiz, indice 0, e o PROMPT_APO_INICIAL, com pais=[None] e
+    passo=0). "pais" e o indice do prompt do qual ele foi gerado via
+    gradiente+edicao. "nota_treino"/"nota_val" sao o F1 de deteccao desse
+    prompt no minibatch do seu passo de criacao e na VALIDACAO inteira --
+    validacao agora e calculada para TODO candidato novo (nao so o
+    vencedor de cada passo), o que aumenta o custo de API do `otimizar`
+    (mais `len(abstracts_val)` chamadas por candidato novo), mas e o que
+    permite plotar a trajetoria completa depois sem rodar de novo.
+    "chamadas_ate_aqui" e o total de chamadas de EXTRACAO (nao conta
+    gradiente/edicao, que so geram texto de prompt) gastas ANTES de
+    avaliar esse candidato. "no_beam" reflete a selecao MAIS RECENTE em
+    que o candidato participou (sobreviventes de passos anteriores tem
+    esse campo atualizado a cada passo em que continuam disputando, mas
+    NAO ganham um novo no -- o no e unico por texto de prompt).
+
+    A selecao final (apos o ultimo passo) NAO reavalia o beam -- escolhe,
+    entre os prompts que sobraram no beam, o de maior "nota_val" ja
+    registrada na trajetoria (que e exatamente a mesma avaliacao que uma
+    reavaliacao repetiria, ja que o conjunto de validacao nunca muda).
 
     Retomada (retomar=True, padrao): se `saida_dir` ja tiver um checkpoint
     de uma rodada anterior (mesmo interrompida no meio), continua a partir
-    do ultimo passo concluido em vez de gastar API reavaliando os passos
-    ja feitos -- ver `_carregar_checkpoint`. Passe retomar=False (ou
+    do ultimo passo concluido -- incluindo a trajetoria e o contador de
+    chamadas ja acumulados -- em vez de gastar API reavaliando os passos
+    ja feitos (ver `_carregar_checkpoint`). Passe retomar=False (ou
     `--reiniciar` na CLI) para ignorar qualquer checkpoint e comecar do
     PROMPT_APO_INICIAL, sobrescrevendo os arquivos de `saida_dir`.
     """
@@ -920,21 +957,33 @@ def otimizar_protegi(client: OpenAI,
 
     beam = [PROMPT_APO_INICIAL]
     historico = []
+    trajetoria = []
+    indice_por_prompt = {}
+    chamadas_metrica = 0
     passo_inicial = 1
     if retomar:
-        historico_salvo, beam_salvo, ultimo_passo, degradado = _carregar_checkpoint(saida_dir)
-        if beam_salvo is not None:
-            historico, beam = historico_salvo, beam_salvo
-            passo_inicial = ultimo_passo + 1
-            modo = " (modo DEGRADADO, beam reduzido a 1 prompt)" if degradado else ""
+        ck = _carregar_checkpoint(saida_dir)
+        if ck is not None:
+            historico, beam = ck["historico"], ck["beam"]
+            trajetoria, chamadas_metrica = ck["trajetoria"], ck["chamadas_metrica"]
+            indice_por_prompt = {no["instrucoes"]: no["indice"] for no in trajetoria}
+            passo_inicial = ck["ultimo_passo"] + 1
+            modo = " (modo DEGRADADO, beam reduzido a 1 prompt)" if ck["degradado"] else ""
             print(f"  [retomando] checkpoint encontrado em {saida_dir} com "
-                  f"{ultimo_passo} passo(s) ja feito(s) -- continuando do passo "
-                  f"{passo_inicial}{modo} (nenhuma chamada de API refeita para os "
-                  f"passos anteriores).")
+                  f"{ck['ultimo_passo']} passo(s) ja feito(s), {len(trajetoria)} "
+                  f"no(s) na trajetoria, {chamadas_metrica} chamadas de metrica ja "
+                  f"gastas -- continuando do passo {passo_inicial}{modo}.")
     if passo_inicial > passos:
         print(f"  [retomando] checkpoint ja tem {passo_inicial - 1} passo(s), >= "
               f"--passos={passos} pedido agora; pulando direto para a selecao final "
               f"com o beam salvo.")
+
+    def _gravar_candidatos_json(melhor_indice=None):
+        (saida_dir / "candidatos.json").write_text(json.dumps(
+            {"inicial": nome_inicial, "melhor": melhor_indice,
+             "chamadas_metrica": chamadas_metrica, "candidatas": trajetoria},
+            ensure_ascii=False, indent=2,
+        ), encoding="utf-8")
 
     for passo in range(passo_inicial, passos + 1):
         print(f"\n=== Passo {passo}/{passos} ===")
@@ -945,11 +994,13 @@ def otimizar_protegi(client: OpenAI,
         gold_minibatch = {i: gold_treino[i] for i in amostra_ids}
 
         candidatos = list(beam)  # mantem os atuais tambem na disputa
+        pai_de = {}  # texto do candidato NOVO -> texto do prompt que o gerou (so este passo)
         # guarda a avaliacao de cada prompt do beam pra nao recalcular na
         # selecao (cada avaliacao ja custa `len(minibatch)` chamadas de API)
         resultados_beam = {}
         for prompt_atual in beam:
             resultado = avaliar_prompt_no_conjunto(client, prompt_atual, minibatch, gold_minibatch)
+            chamadas_metrica += len(minibatch)
             resultados_beam[prompt_atual] = resultado
             erros = resultado["erros"]
             if not erros:
@@ -957,6 +1008,8 @@ def otimizar_protegi(client: OpenAI,
             gradientes = gerar_gradientes(client, prompt_atual, erros, num_gradientes=num_gradientes)
             for g in gradientes:
                 novos = editar_prompt(client, prompt_atual, g, num_edicoes=num_edicoes)
+                for n in novos:
+                    pai_de.setdefault(n, prompt_atual)
                 candidatos.extend(novos)
 
         # avalia todos os candidatos no MESMO minibatch e seleciona TopK,
@@ -967,23 +1020,50 @@ def otimizar_protegi(client: OpenAI,
                 r = resultados_beam[c]
             else:
                 r = avaliar_prompt_no_conjunto(client, c, minibatch, gold_minibatch)
+                chamadas_metrica += len(minibatch)
             avaliados.append((r["f1_deteccao"], c, r))
+
+            # registra o no na trajetoria na PRIMEIRA vez que esse texto de
+            # prompt aparece (candidatos que ja sao nos existentes -- ex.
+            # sobreviventes do beam -- nao geram um no novo)
+            if c not in indice_por_prompt:
+                if c == PROMPT_APO_INICIAL:
+                    pais_indices, passo_criacao = [None], 0
+                else:
+                    pai_texto = pai_de.get(c)
+                    pai_indice = indice_por_prompt.get(pai_texto)
+                    pais_indices, passo_criacao = [pai_indice], passo
+                chamadas_antes = chamadas_metrica
+                r_val = avaliar_prompt_no_conjunto(client, c, abstracts_val, gold_val)
+                chamadas_metrica += len(abstracts_val)
+                indice = len(trajetoria)
+                trajetoria.append({
+                    "indice": indice, "pais": pais_indices, "passo": passo_criacao,
+                    "no_beam": False,
+                    "nota_val": r_val["f1_deteccao"], "nota_treino": r["f1_deteccao"],
+                    "chamadas_ate_aqui": chamadas_antes, "instrucoes": c,
+                })
+                indice_por_prompt[c] = indice
 
         avaliados.sort(key=lambda x: x[0], reverse=True)
         beam = [c for _, c, _ in avaliados[:beam_width]]
 
+        # "no_beam" reflete a selecao deste passo pra TODO candidato
+        # avaliado aqui, inclusive sobreviventes de passos anteriores
+        beam_textos = set(beam)
+        for _, c, _ in avaliados:
+            trajetoria[indice_por_prompt[c]]["no_beam"] = c in beam_textos
+
         melhor_f1, melhor_prompt, melhor_resultado = avaliados[0]
         print(f"  candidatos avaliados: {len(candidatos)} | melhor F1 (treino/minibatch): {melhor_f1}")
-
-        print(f"  avaliando o prompt vencedor do passo na VALIDACAO ({len(abstracts_val)} resumos)...")
-        resultado_val = avaliar_prompt_no_conjunto(client, melhor_prompt, abstracts_val, gold_val)
-        print(f"  F1 (validacao): {resultado_val['f1_deteccao']}")
+        print(f"  chamadas de metrica acumuladas: {chamadas_metrica}")
 
         historico.append({
             "passo": passo,
             "tamanho_minibatch_treino": len(minibatch),
             "num_candidatos_gerados": len(candidatos),
             "tamanho_beam": len(beam),
+            "chamadas_metrica_ate_aqui": chamadas_metrica,
             # metricas de TODO candidato avaliado neste passo (para plot de
             # dispersao/evolucao da populacao inteira, nao so do vencedor)
             "candidatos_treino": [
@@ -992,7 +1072,6 @@ def otimizar_protegi(client: OpenAI,
             ],
             "beam_apos_selecao_f1_treino": [f1 for f1, _, _ in avaliados[:beam_width]],
             "melhor_treino": _resumo_metricas(melhor_resultado),
-            "validacao": _resumo_metricas(resultado_val),
         })
         (saida_dir / f"passo_{passo}_melhor_prompt.txt").write_text(melhor_prompt, encoding="utf-8")
         # beam completo (nao so o vencedor) -- e o que permite retomar do
@@ -1005,27 +1084,20 @@ def otimizar_protegi(client: OpenAI,
         (saida_dir / "historico.json").write_text(
             json.dumps(historico, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        _gravar_candidatos_json(melhor_indice=None)  # "melhor" so e conhecido no final
 
-    # selecao final: reavalia o beam inteiro na VALIDACAO (nunca no treino
-    # sozinho, e nunca no teste) para escolher o vencedor de forma robusta
-    # sem tocar no holdout
-    print("\n=== Selecao final: avaliando beam completo na VALIDACAO ===")
-    resultados_finais = []
-    for c in beam:
-        r = avaliar_prompt_no_conjunto(client, c, abstracts_val, gold_val)
-        resultados_finais.append((r["f1_deteccao"], c, r))
-    resultados_finais.sort(key=lambda x: x[0], reverse=True)
-    melhor_f1_final, prompt_final, _ = resultados_finais[0]
-    print(f"  F1 final (validacao) do prompt escolhido: {melhor_f1_final}")
+    # selecao final: escolhe, dentro do beam final, quem tem a MAIOR
+    # nota_val ja registrada na trajetoria -- nao precisa reavaliar, pois
+    # e exatamente a mesma avaliacao (mesmo conjunto de validacao) que foi
+    # feita quando o candidato foi criado
+    indices_do_beam_final = [indice_por_prompt[c] for c in beam]
+    indice_melhor = max(indices_do_beam_final, key=lambda i: trajetoria[i]["nota_val"])
+    prompt_final = trajetoria[indice_melhor]["instrucoes"]
+    print(f"\n=== Selecao final: maior nota_val no beam = "
+          f"{trajetoria[indice_melhor]['nota_val']} (indice {indice_melhor}) ===")
 
     (saida_dir / "prompt_final.txt").write_text(prompt_final, encoding="utf-8")
-    (saida_dir / "selecao_final_validacao.json").write_text(
-        json.dumps(
-            [{"prompt_preview": c[:120], **_resumo_metricas(r)} for _, c, r in resultados_finais],
-            ensure_ascii=False, indent=2,
-        ),
-        encoding="utf-8",
-    )
+    _gravar_candidatos_json(melhor_indice=indice_melhor)
     return prompt_final
 
 
@@ -1080,6 +1152,7 @@ def cmd_otimizar(args):
         client, abstracts_treino, extracoes_treino, abstracts_val, extracoes_val,
         Path(args.output), passos=args.passos, beam_width=args.beam,
         tamanho_minibatch=args.tamanho_minibatch, retomar=not args.reiniciar,
+        nome_inicial=args.nome_inicial,
     )
 
     saida_dir = Path(args.output)
@@ -1087,6 +1160,7 @@ def cmd_otimizar(args):
         json.dumps(sorted(gold_teste.keys()), ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print("\nPrompt final salvo em:", saida_dir / "prompt_final.txt")
+    print(f"Trajetoria completa (formato GEPA/analisar.py) salva em: {saida_dir / 'candidatos.json'}")
     print(f"IDs de TESTE (holdout, nunca visto na otimizacao) salvos em: "
           f"{saida_dir / 'holdout_teste_ids.json'}")
     print("Para avaliar sem vazamento, rode `avaliar-prompt` com os MESMOS --gold/--candidatos "
@@ -1189,6 +1263,10 @@ def main():
                           "se --output ja tiver historico.json + beam_apos_passo_N.json de uma "
                           "rodada anterior (mesmo interrompida), a otimizacao retoma do ultimo "
                           "passo concluido em vez de refazer chamadas de API ja pagas.")
+    p3.add_argument("--nome-inicial", default="p0_ingenuo", dest="nome_inicial",
+                     help="Rotulo do prompt inicial gravado no campo 'inicial' de candidatos.json "
+                          "(ex. 'v00_ingenuo'). So identifica a rodada nos plots -- nao muda o "
+                          "prompt em si.")
     _add_arg_resumos_extra(p3)
     _add_arg_config(p3)
     p3.set_defaults(func=cmd_otimizar)
