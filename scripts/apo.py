@@ -899,7 +899,7 @@ def otimizar_protegi(client: OpenAI,
                       saida_dir: Path,
                       passos: int = 4, beam_width: int = 3,
                       num_gradientes: int = 2, num_edicoes: int = 2,
-                      tamanho_minibatch: int = 10, retomar: bool = True,
+                      tamanho_minibatch: int = 20, retomar: bool = True,
                       nome_inicial: str = "p0_ingenuo") -> str:
     """Loop principal do ProTeGi (Algoritmo 1 do paper), simplificado:
       - beam de tamanho beam_width, iniciando com [PROMPT_APO_INICIAL]
