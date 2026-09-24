@@ -64,17 +64,36 @@ import os
 import random
 import re
 import time
+from collections import Counter
 from pathlib import Path
 
+import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 BASE_URL = "https://iluma.cnpem.br:4000/v1"
-MODELO = "iluma"
-TEMPERATURE_EXTRACAO = 0.5
+CONFIG_PADRAO = Path(__file__).resolve().parent / "config.yaml"
+
+# Temperatura da etapa de otimizacao (gradiente/edicao do ProTeGi). Nao vem
+# do YAML: o YAML controla a EXTRACAO; aqui queremos diversidade de propostas.
+# Passa sempre pelo piso da instalacao (ver chamar_llm).
 TEMPERATURE_OTIMIZACAO = 1.0
+
+# Configuracao do LLM. Preenchida por carregar_config() no inicio de main();
+# os valores abaixo sao so o fallback caso o modulo seja importado sem YAML.
+# Credenciais NUNCA ficam aqui nem no YAML: vem de chave/chave.env.
+LLM_CFG = {
+    "modelo": "iluma",
+    "temperatura_piso": 0.5,
+    "temperatura": 0.5,
+    "max_tokens": 16000,
+    "max_tokens_teto": 16000,
+    "timeout_s": 120,
+    "tentativas": 3,
+    "k_autoconsistencia": 1,
+}
 
 # Seed fixa para TODO o script (amostragem de minibatch, amostragem da
 # auditoria em `extrair-tudo`). Nao e exposta via CLI de proposito.
@@ -127,21 +146,68 @@ If the abstract has no relevant values, answer {"extracoes": []}.
 
 
 # ============================================================
-# Cliente API
+# Configuracao (config.yaml) e cliente API
 # ============================================================
+
+def carregar_config(caminho: Path = CONFIG_PADRAO) -> dict:
+    """Le a secao `llm` de config.yaml, valida e grava em LLM_CFG.
+
+    Invariantes checados aqui (falha cedo, antes de gastar chamadas):
+      - temperatura >= temperatura_piso (a instalacao rejeita abaixo do piso);
+      - max_tokens <= max_tokens_teto;
+      - tentativas >= 1 e k_autoconsistencia >= 1 (inteiros).
+    """
+    global LLM_CFG
+    if not caminho.exists():
+        raise FileNotFoundError(f"config.yaml nao encontrado em {caminho}.")
+    with caminho.open(encoding="utf-8") as f:
+        bruto = yaml.safe_load(f) or {}
+    if "llm" not in bruto:
+        raise ValueError(f"{caminho}: secao 'llm' ausente.")
+    cfg = {**LLM_CFG, **bruto["llm"]}
+
+    desconhecidas = set(bruto["llm"]) - set(LLM_CFG)
+    if desconhecidas:
+        raise ValueError(f"{caminho}: chaves desconhecidas em 'llm': {sorted(desconhecidas)}")
+
+    if cfg["temperatura"] < cfg["temperatura_piso"]:
+        raise ValueError(
+            f"temperatura ({cfg['temperatura']}) abaixo do piso da instalacao "
+            f"({cfg['temperatura_piso']}).")
+    if cfg["max_tokens"] > cfg["max_tokens_teto"]:
+        raise ValueError(
+            f"max_tokens ({cfg['max_tokens']}) acima do teto ({cfg['max_tokens_teto']}).")
+    for chave in ("tentativas", "k_autoconsistencia", "max_tokens", "timeout_s"):
+        if not isinstance(cfg[chave], int) or cfg[chave] < 1:
+            raise ValueError(f"'{chave}' deve ser inteiro >= 1 (recebido: {cfg[chave]!r}).")
+
+    LLM_CFG = cfg
+    return cfg
+
 
 def get_client() -> OpenAI:
     load_dotenv(BASE_DIR / "chave" / "chave.env")
     token = os.getenv("ILUMA_API_KEY")
     if not token:
         raise RuntimeError("ILUMA_API_KEY não encontrada em chave.env.")
-    return OpenAI(base_url=BASE_URL, api_key=token, timeout=120.0, max_retries=1)
+    # `tentativas` no YAML = numero TOTAL de tentativas; o SDK conta so as
+    # retentativas apos a primeira, entao max_retries = tentativas - 1.
+    return OpenAI(
+        base_url=BASE_URL,
+        api_key=token,
+        timeout=float(LLM_CFG["timeout_s"]),
+        max_retries=LLM_CFG["tentativas"] - 1,
+    )
 
 
 def chamar_llm(client: OpenAI, system_prompt: str, user_content: str,
-                temperature: float = TEMPERATURE_EXTRACAO, json_mode: bool = True,
+                temperature: float = None, json_mode: bool = True,
                 habilitar_thinking: bool = False) -> str:
     """Chamada generica ao LLM. Retorna o texto da resposta (string).
+
+    Temperatura: se `temperature` for None usa LLM_CFG["temperatura"]; em
+    qualquer caso o valor efetivo e max(temperatura, temperatura_piso),
+    porque esta instalacao rejeita valores abaixo do piso.
 
     O modelo servido (Qwen3-class, MoE ~A10B) vem com "thinking" LIGADO por
     padrao no template de chat: ele gera um bloco de raciocinio interno
@@ -153,13 +219,18 @@ def chamar_llm(client: OpenAI, system_prompt: str, user_content: str,
     o parametro extra_body/chat_template_kwargs suportado por vLLM para
     a familia Qwen3.
     """
+    if temperature is None:
+        temperature = LLM_CFG["temperatura"]
+    temperature = max(temperature, LLM_CFG["temperatura_piso"])
+
     kwargs = dict(
-        model=MODELO,
+        model=LLM_CFG["modelo"],
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
         temperature=temperature,
+        max_tokens=LLM_CFG["max_tokens"],
         extra_body={"chat_template_kwargs": {"enable_thinking": habilitar_thinking}},
     )
     if json_mode:
@@ -182,7 +253,8 @@ def chamar_llm(client: OpenAI, system_prompt: str, user_content: str,
                 f", reasoning_content_tamanho={len(reasoning)} chars "
                 "(o modelo pode estar gastando o max_tokens todo 'pensando' "
                 "e nao sobra espaco para o JSON final -- considere reduzir o "
-                "raciocinio ou aumentar MAX_TOKEN)"
+                "raciocinio ou aumentar max_tokens em config.yaml, respeitando "
+                "max_tokens_teto)"
             )
         raise RuntimeError(f"A API não retornou conteúdo ({detalhes}).")
     return response.choices[0].message.content
@@ -330,20 +402,87 @@ def textos_para_ids(ids, candidatos: dict, resumos_extra: dict = None) -> dict:
 # conjunto de abstracts.
 # ============================================================
 
-def extrair_com_prompt(client: OpenAI, system_prompt: str, abstract_texto: str) -> list:
-    """Roda o prompt (system_prompt) sobre um abstract e devolve a lista de
-    extracoes (ja parseada), tolerando erro de parsing (devolve lista vazia
-    e nao derruba o restante do lote)."""
+def _chave_voto(extracao: dict) -> tuple:
+    """Identidade de uma extracao para fins de votacao: os campos que
+    definem O QUE foi extraido (valor, faixa, unidade, entidade-alvo).
+    Campos de classificacao (metric_type etc.) ficam de fora de proposito:
+    duas amostras que extraem o mesmo valor mas classificam diferente
+    votam juntas, e a classificacao e decidida por maioria dentro do grupo."""
+    def norm(x):
+        return str(x).strip().lower() if x is not None else None
+    return (norm(extracao.get("value")), norm(extracao.get("value_max")),
+            norm(extracao.get("unit")), norm(extracao.get("target_entity")))
+
+
+def _votar_extracoes(amostras: list) -> list:
+    """Votacao por autoconsistencia sobre k listas de extracoes.
+
+    Votar a resposta inteira quase nunca daria maioria (listas de objetos
+    raramente coincidem por completo), entao o voto e por EXTRACAO: uma
+    extracao sobrevive se aparece em pelo menos ceil(k/2) amostras. Dentro
+    de cada grupo sobrevivente, cada campo restante (metric_type,
+    entity_type, context_modifier, ...) recebe o valor mais frequente; o
+    desempate vai para a primeira amostra em que a extracao apareceu.
+    """
+    k = len(amostras)
+    minimo = (k + 1) // 2
+    grupos = {}
+    for lista in amostras:
+        vistos_nesta_amostra = set()
+        for ex in lista:
+            if not isinstance(ex, dict):
+                continue
+            chave = _chave_voto(ex)
+            if chave in vistos_nesta_amostra:
+                continue  # a mesma amostra nao vota duas vezes na mesma extracao
+            vistos_nesta_amostra.add(chave)
+            grupos.setdefault(chave, []).append(ex)
+
+    resultado = []
+    for chave, membros in grupos.items():
+        if len(membros) < minimo:
+            continue
+        consolidada = dict(membros[0])
+        campos = set().union(*(m.keys() for m in membros))
+        for campo in campos:
+            valores = [json.dumps(m.get(campo), sort_keys=True, ensure_ascii=False)
+                       for m in membros if campo in m]
+            mais_comum = Counter(valores).most_common(1)[0][0]
+            consolidada[campo] = json.loads(mais_comum)
+        resultado.append(consolidada)
+    return resultado
+
+
+def _extrair_uma_amostra(client: OpenAI, system_prompt: str, abstract_texto: str):
+    """Uma chamada + parse. Devolve a lista de extracoes, ou None se falhou."""
     try:
         raw = chamar_llm(client, system_prompt, abstract_texto)
         data = json.loads(raw)
         extracoes = data.get("extracoes", [])
-        if not isinstance(extracoes, list):
-            return []
-        return extracoes
+        return extracoes if isinstance(extracoes, list) else None
     except Exception as e:
         print(f"    [erro na extracao: {type(e).__name__}: {e}]")
+        return None
+
+
+def extrair_com_prompt(client: OpenAI, system_prompt: str, abstract_texto: str) -> list:
+    """Roda o prompt (system_prompt) sobre um abstract e devolve a lista de
+    extracoes (ja parseada), tolerando erro de parsing (devolve lista vazia
+    e nao derruba o restante do lote).
+
+    Com k_autoconsistencia == 1 (congelado, ver config.yaml) e exatamente
+    uma chamada, igual ao comportamento anterior. Com k > 1, faz k chamadas
+    e consolida por votacao (ver _votar_extracoes); amostras que falharam
+    nao votam, mas o quorum continua calculado sobre as k pedidas."""
+    k = LLM_CFG["k_autoconsistencia"]
+    if k == 1:
+        return _extrair_uma_amostra(client, system_prompt, abstract_texto) or []
+
+    amostras = [_extrair_uma_amostra(client, system_prompt, abstract_texto) for _ in range(k)]
+    validas = [a for a in amostras if a is not None]
+    if not validas:
         return []
+    return _votar_extracoes(validas)
 
 
 def rodar_prompt_sobre_abstracts(client: OpenAI, system_prompt: str,
@@ -691,7 +830,7 @@ def otimizar_protegi(client: OpenAI,
                       saida_dir: Path,
                       passos: int = 4, beam_width: int = 3,
                       num_gradientes: int = 2, num_edicoes: int = 2,
-                      tamanho_minibatch: int = None) -> str:
+                      tamanho_minibatch: int = 10) -> str:
     """Loop principal do ProTeGi (Algoritmo 1 do paper), simplificado:
       - beam de tamanho beam_width, iniciando com [PROMPT_APO_INICIAL]
       - a cada passo: expande cada prompt do beam (gradiente -> edicoes)
@@ -928,6 +1067,10 @@ def main():
     parser = argparse.ArgumentParser(description="APO/ProTeGi para extracao de REE.")
     sub = parser.add_subparsers(dest="comando", required=True)
 
+    def _add_arg_config(p):
+        p.add_argument("--config", default=str(CONFIG_PADRAO),
+                        help="Caminho do config.yaml (padrao: config.yaml ao lado do script).")
+
     def _add_arg_resumos_extra(p):
         p.add_argument("--resumos-extra", default=None, dest="resumos_extra",
                         help="Opcional: CSV com colunas 'id_openalex' (URL) e 'abstract' "
@@ -947,6 +1090,7 @@ def main():
                           "--gold (dev->treino, val->validacao, test->teste), o mesmo usado "
                           "em `otimizar`.")
     _add_arg_resumos_extra(p2)
+    _add_arg_config(p2)
     p2.set_defaults(func=cmd_avaliar_prompt)
 
     p3 = sub.add_parser("otimizar", help="Roda o ciclo ProTeGi a partir do p0 ingenuo.")
@@ -958,6 +1102,7 @@ def main():
     p3.add_argument("--tamanho-minibatch", type=int, default=None, dest="tamanho_minibatch",
                      help="Tamanho do minibatch de TREINO usado a cada passo. Padrao: treino inteiro.")
     _add_arg_resumos_extra(p3)
+    _add_arg_config(p3)
     p3.set_defaults(func=cmd_otimizar)
 
     p3b = sub.add_parser("extrair-tudo", help="Roda o prompt final sobre TODO o corpus de candidatos e monta amostra estratificada para auditoria manual.")
@@ -971,9 +1116,15 @@ def main():
     p3b.add_argument("--gold", default=None,
                       help="Opcional: arquivo de gold-standard (doc_id, extracoes, ...), usado so para EXCLUIR "
                            "da amostra os doc_id que ja tem gold (esses ja sao validados via avaliar-prompt).")
+    _add_arg_config(p3b)
     p3b.set_defaults(func=cmd_extrair_tudo)
 
     args = parser.parse_args()
+    cfg = carregar_config(Path(args.config))
+    print(f"[config] modelo={cfg['modelo']} temperatura={cfg['temperatura']} "
+          f"(piso {cfg['temperatura_piso']}) max_tokens={cfg['max_tokens']} "
+          f"timeout={cfg['timeout_s']}s tentativas={cfg['tentativas']} "
+          f"k={cfg['k_autoconsistencia']}")
     args.func(args)
 
 

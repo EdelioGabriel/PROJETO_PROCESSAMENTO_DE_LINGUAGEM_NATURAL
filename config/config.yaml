@@ -1,0 +1,14 @@
+llm:
+  # Credenciais vem do .env, nunca daqui.
+  modelo: iluma
+  # Esta instalacao rejeita temperatura abaixo de 0.5. Nao e negociavel.
+  temperatura_piso: 0.5
+  temperatura: 0.5
+  max_tokens: 16000
+  max_tokens_teto: 16000
+  timeout_s: 120
+  tentativas: 3
+  # F4-07: numero de amostras para votacao por autoconsistencia.
+  # TODO: congelar apos a ablacao k em {1, 3, 5}.
+  # Congelado em 1 pelo prazo: a ablacao de autoconsistencia (F4-07) foi cortada.
+  k_autoconsistencia: 1
