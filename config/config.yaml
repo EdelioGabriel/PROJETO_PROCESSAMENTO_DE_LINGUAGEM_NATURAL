@@ -6,7 +6,7 @@ llm:
   temperatura: 0.5
   max_tokens: 16000
   max_tokens_teto: 16000
-  timeout_s: 120
+  timeout_s: 5000
   tentativas: 3
   # F4-07: numero de amostras para votacao por autoconsistencia.
   # TODO: congelar apos a ablacao k em {1, 3, 5}.

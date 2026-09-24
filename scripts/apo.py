@@ -453,15 +453,18 @@ def _votar_extracoes(amostras: list) -> list:
     return resultado
 
 
-def _extrair_uma_amostra(client: OpenAI, system_prompt: str, abstract_texto: str):
+def _extrair_uma_amostra(client, system_prompt, abstract_texto):
     """Uma chamada + parse. Devolve a lista de extracoes, ou None se falhou."""
+    import time
+    t = time.time()
     try:
         raw = chamar_llm(client, system_prompt, abstract_texto)
+        print(f"    [ok em {time.time()-t:.1f}s | prompt={len(system_prompt)} chars | abstract={len(abstract_texto)} chars]")
         data = json.loads(raw)
         extracoes = data.get("extracoes", [])
         return extracoes if isinstance(extracoes, list) else None
     except Exception as e:
-        print(f"    [erro na extracao: {type(e).__name__}: {e}]")
+        print(f"    [erro em {time.time()-t:.1f}s | prompt={len(system_prompt)} chars | abstract={len(abstract_texto)} chars | {type(e).__name__}: {e}]")
         return None
 
 
@@ -824,13 +827,65 @@ def avaliar_prompt_no_conjunto(client: OpenAI, prompt_texto: str,
     return avaliar(predicoes, gold_subset)
 
 
+def _carregar_checkpoint(saida_dir: Path):
+    """Procura, em `saida_dir`, o checkpoint de uma rodada anterior (e
+    possivelmente interrompida) de `otimizar`: `historico.json` casado com
+    o `beam_apos_passo_N.json` do ultimo passo registrado.
+
+    Se `beam_apos_passo_N.json` nao existir (rodada de uma versao anterior
+    a essa funcionalidade, que so salvava o VENCEDOR de cada passo em
+    `passo_N_melhor_prompt.txt`, nao o beam inteiro), cai para um resumo
+    DEGRADADO: reconstroi um beam de tamanho 1 a partir desse vencedor, e
+    ainda assim retoma dali -- perde a diversidade dos outros prompts do
+    beam antigo, mas reaproveita o progresso principal (nao refaz os
+    passos ja feitos do zero).
+
+    Devolve (historico, beam, ultimo_passo, degradado: bool). Se nao
+    houver historico.json, se ele estiver vazio, ou se nem o beam nem o
+    .txt do vencedor existirem, devolve ([], None, 0, False), sinalizando
+    "comecar do zero"."""
+    historico_path = saida_dir / "historico.json"
+    if not historico_path.exists():
+        return [], None, 0, False
+    historico = json.loads(historico_path.read_text(encoding="utf-8"))
+    if not historico:
+        return [], None, 0, False
+    ultimo_passo = historico[-1]["passo"]
+
+    beam_path = saida_dir / f"beam_apos_passo_{ultimo_passo}.json"
+    if beam_path.exists():
+        beam = json.loads(beam_path.read_text(encoding="utf-8"))
+        return historico, beam, ultimo_passo, False
+
+    melhor_path = saida_dir / f"passo_{ultimo_passo}_melhor_prompt.txt"
+    if melhor_path.exists():
+        print(f"  [aviso] {historico_path.name} tem {ultimo_passo} passo(s), mas "
+              f"{beam_path.name} nao existe (checkpoint de uma versao anterior a "
+              f"esta funcionalidade) -- retomando em modo DEGRADADO: o beam vai "
+              f"reiniciar so com o vencedor salvo em {melhor_path.name}, perdendo "
+              f"a diversidade dos outros prompts do beam antigo, mas sem refazer "
+              f"os {ultimo_passo} passo(s) ja feitos.")
+        beam = [melhor_path.read_text(encoding="utf-8")]
+        return historico, beam, ultimo_passo, True
+
+    print(f"  [aviso] {historico_path.name} tem {ultimo_passo} passo(s), mas nem "
+          f"{beam_path.name} nem {melhor_path.name} existem -- nao ha nada pra "
+          f"retomar. Para nao arriscar sobrescrever esse historico antigo, pare "
+          f"e mova/renomeie {saida_dir} antes de rodar de novo, ou apague-o de "
+          f"proposito se realmente quiser comecar do zero.")
+    raise RuntimeError(
+        f"Checkpoint inconsistente em {saida_dir}: historico.json existe mas nao "
+        f"ha beam nem prompt vencedor pra retomar (nem para um resumo degradado)."
+    )
+
+
 def otimizar_protegi(client: OpenAI,
                       abstracts_treino: dict, gold_treino: dict,
                       abstracts_val: dict, gold_val: dict,
                       saida_dir: Path,
                       passos: int = 4, beam_width: int = 3,
                       num_gradientes: int = 2, num_edicoes: int = 2,
-                      tamanho_minibatch: int = 10) -> str:
+                      tamanho_minibatch: int = 10, retomar: bool = True) -> str:
     """Loop principal do ProTeGi (Algoritmo 1 do paper), simplificado:
       - beam de tamanho beam_width, iniciando com [PROMPT_APO_INICIAL]
       - a cada passo: expande cada prompt do beam (gradiente -> edicoes)
@@ -851,6 +906,13 @@ def otimizar_protegi(client: OpenAI,
     avaliado a cada passo, do vencedor no treino e na validacao), pensado
     para permitir plots externos sem precisar rodar o script de novo, e
     devolve o texto do prompt final.
+
+    Retomada (retomar=True, padrao): se `saida_dir` ja tiver um checkpoint
+    de uma rodada anterior (mesmo interrompida no meio), continua a partir
+    do ultimo passo concluido em vez de gastar API reavaliando os passos
+    ja feitos -- ver `_carregar_checkpoint`. Passe retomar=False (ou
+    `--reiniciar` na CLI) para ignorar qualquer checkpoint e comecar do
+    PROMPT_APO_INICIAL, sobrescrevendo os arquivos de `saida_dir`.
     """
     saida_dir.mkdir(parents=True, exist_ok=True)
     ids_treino = list(abstracts_treino.keys())
@@ -858,8 +920,23 @@ def otimizar_protegi(client: OpenAI,
 
     beam = [PROMPT_APO_INICIAL]
     historico = []
+    passo_inicial = 1
+    if retomar:
+        historico_salvo, beam_salvo, ultimo_passo, degradado = _carregar_checkpoint(saida_dir)
+        if beam_salvo is not None:
+            historico, beam = historico_salvo, beam_salvo
+            passo_inicial = ultimo_passo + 1
+            modo = " (modo DEGRADADO, beam reduzido a 1 prompt)" if degradado else ""
+            print(f"  [retomando] checkpoint encontrado em {saida_dir} com "
+                  f"{ultimo_passo} passo(s) ja feito(s) -- continuando do passo "
+                  f"{passo_inicial}{modo} (nenhuma chamada de API refeita para os "
+                  f"passos anteriores).")
+    if passo_inicial > passos:
+        print(f"  [retomando] checkpoint ja tem {passo_inicial - 1} passo(s), >= "
+              f"--passos={passos} pedido agora; pulando direto para a selecao final "
+              f"com o beam salvo.")
 
-    for passo in range(1, passos + 1):
+    for passo in range(passo_inicial, passos + 1):
         print(f"\n=== Passo {passo}/{passos} ===")
         # minibatch de treino, deterministico por passo (seed fixa + passo)
         rng = random.Random(SEED + passo)
@@ -918,6 +995,11 @@ def otimizar_protegi(client: OpenAI,
             "validacao": _resumo_metricas(resultado_val),
         })
         (saida_dir / f"passo_{passo}_melhor_prompt.txt").write_text(melhor_prompt, encoding="utf-8")
+        # beam completo (nao so o vencedor) -- e o que permite retomar do
+        # ponto exato onde parou, em vez de so do melhor prompt do passo
+        (saida_dir / f"beam_apos_passo_{passo}.json").write_text(
+            json.dumps(beam, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         # regrava a cada passo (nao so no final), pra nao perder o log
         # granular se o processo for interrompido no meio de uma rodada longa
         (saida_dir / "historico.json").write_text(
@@ -997,7 +1079,7 @@ def cmd_otimizar(args):
     prompt_final = otimizar_protegi(
         client, abstracts_treino, extracoes_treino, abstracts_val, extracoes_val,
         Path(args.output), passos=args.passos, beam_width=args.beam,
-        tamanho_minibatch=args.tamanho_minibatch,
+        tamanho_minibatch=args.tamanho_minibatch, retomar=not args.reiniciar,
     )
 
     saida_dir = Path(args.output)
@@ -1101,6 +1183,12 @@ def main():
     p3.add_argument("--beam", type=int, default=3)
     p3.add_argument("--tamanho-minibatch", type=int, default=None, dest="tamanho_minibatch",
                      help="Tamanho do minibatch de TREINO usado a cada passo. Padrao: treino inteiro.")
+    p3.add_argument("--reiniciar", action="store_true",
+                     help="Ignora qualquer checkpoint existente em --output e comeca do zero "
+                          "(PROMPT_APO_INICIAL), sobrescrevendo os arquivos la. Sem essa flag, "
+                          "se --output ja tiver historico.json + beam_apos_passo_N.json de uma "
+                          "rodada anterior (mesmo interrompida), a otimizacao retoma do ultimo "
+                          "passo concluido em vez de refazer chamadas de API ja pagas.")
     _add_arg_resumos_extra(p3)
     _add_arg_config(p3)
     p3.set_defaults(func=cmd_otimizar)
