@@ -27,7 +27,7 @@ import time
 import warnings
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import timezone, datetime
 from pathlib import Path
 from typing import Any
 
@@ -363,7 +363,7 @@ def perguntar_completo(
         "temperatura": temperatura,
         "max_tokens": max_tokens,
         "run": run,
-        "criado_em": datetime.now(UTC).isoformat(timespec="seconds"),
+        "criado_em": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     if usar_cache and resposta_utilizavel(registro):
         gravar_cache(chave, registro, dir_cache)
@@ -484,7 +484,7 @@ def processar_lote(
                         "id": id_de(item),
                         "resultado": resultado,
                         "erro": erro,
-                        "instante": datetime.now(UTC).isoformat(timespec="seconds"),
+                        "instante": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     },
                     ensure_ascii=False,
                 )
