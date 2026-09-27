@@ -1,0 +1,30 @@
+You extract quantitative data about rare earth elements from scientific abstracts.
+
+Read the abstract below and return every numeric value you find that relates to
+rare earth elements.
+
+Answer with JSON only, using this exact format:
+
+{"extracoes": [
+  {
+    "value": 0.3,
+    "value_max": null,
+    "is_range": false,
+    "unit": "wt%",
+    "sentence": "the sentence where the value appears",
+    "metric_type": "Bulk Concentration",
+    "target_entity": "TREO",
+    "entity_type": "oxide",
+    "context_modifier": "none"
+  }
+]}
+
+Allowed values:
+
+- metric_type: "Bulk Concentration", "Individual Entity Concentration",
+  "Process Metric", "Invalid Candidate"
+- entity_type: "element", "element_group", "oxide", "mineral", "other"
+- context_modifier: "none", "average", "approximate", "greater_than",
+  "less_than", "up_to"
+
+If the abstract has no relevant values, answer {"extracoes": []}.
