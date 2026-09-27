@@ -202,12 +202,20 @@ def get_client() -> OpenAI:
 
 def chamar_llm(client: OpenAI, system_prompt: str, user_content: str,
                 temperature: float = None, json_mode: bool = True,
-                habilitar_thinking: bool = False) -> str:
+                habilitar_thinking: bool = False, seed: int = None) -> str:
     """Chamada generica ao LLM. Retorna o texto da resposta (string).
 
     Temperatura: se `temperature` for None usa LLM_CFG["temperatura"]; em
     qualquer caso o valor efetivo e max(temperatura, temperatura_piso),
     porque esta instalacao rejeita valores abaixo do piso.
+
+    `seed` (opcional): passado como `seed` da API OpenAI-compatible, se o
+    backend suportar geracao reprodutivel. Usado pelas "3 sementes" de
+    `avaliar-prompt` no conjunto de teste (medir variancia do modelo com
+    temperature>0, nao do split -- o split e sempre o mesmo, vem da
+    particao do gold). Se o backend ignorar esse parametro, cada chamada
+    ainda assim amostra normalmente (so deixa de ser reprodutivel
+    determinando a mesma saida pra mesma seed).
 
     O modelo servido (Qwen3-class, MoE ~A10B) vem com "thinking" LIGADO por
     padrao no template de chat: ele gera um bloco de raciocinio interno
@@ -233,16 +241,13 @@ def chamar_llm(client: OpenAI, system_prompt: str, user_content: str,
         max_tokens=LLM_CFG["max_tokens"],
         extra_body={"chat_template_kwargs": {"enable_thinking": habilitar_thinking}},
     )
+    if seed is not None:
+        kwargs["seed"] = seed
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
     response = client.chat.completions.create(**kwargs)
     if not response.choices or not response.choices[0].message.content:
         reason = response.choices[0].finish_reason if response.choices else "no choices"
-        # Alguns backends (modelos com "thinking"/reasoning) consomem o
-        # budget de max_tokens gerando um raciocinio interno antes do
-        # conteudo final, e devolvem content vazio com finish_reason=length.
-        # Se o backend expuser esse campo (reasoning_content, comum em
-        # implementacoes estilo DeepSeek/vLLM/LiteLLM), isso confirma a causa.
         reasoning = getattr(response.choices[0].message, "reasoning_content", None) if response.choices else None
         usage = getattr(response, "usage", None)
         detalhes = f"finish_reason={reason}"
@@ -453,12 +458,12 @@ def _votar_extracoes(amostras: list) -> list:
     return resultado
 
 
-def _extrair_uma_amostra(client, system_prompt, abstract_texto):
+def _extrair_uma_amostra(client, system_prompt, abstract_texto, seed=None):
     """Uma chamada + parse. Devolve a lista de extracoes, ou None se falhou."""
     import time
     t = time.time()
     try:
-        raw = chamar_llm(client, system_prompt, abstract_texto)
+        raw = chamar_llm(client, system_prompt, abstract_texto, seed=seed)
         print(f"    [ok em {time.time()-t:.1f}s | prompt={len(system_prompt)} chars | abstract={len(abstract_texto)} chars]")
         data = json.loads(raw)
         extracoes = data.get("extracoes", [])
@@ -468,10 +473,19 @@ def _extrair_uma_amostra(client, system_prompt, abstract_texto):
         return None
 
 
-def extrair_com_prompt(client: OpenAI, system_prompt: str, abstract_texto: str) -> list:
+def extrair_com_prompt(client: OpenAI, system_prompt: str, abstract_texto: str,
+                        seed: int = None) -> list:
     """Roda o prompt (system_prompt) sobre um abstract e devolve a lista de
     extracoes (ja parseada), tolerando erro de parsing (devolve lista vazia
     e nao derruba o restante do lote).
+
+    `seed` (opcional): repassado a chamar_llm em toda chamada desta
+    extracao. Usado pelas "3 sementes" de `avaliar-prompt --conjunto
+    teste` (SEMENTES=[0,1,2] no analisar.py) -- mede variancia do MODELO
+    (temperature>0), nao do split, que e sempre o mesmo (vem da particao
+    do gold). Com k_autoconsistencia > 1, a mesma seed base e usada nas k
+    amostras (o backend, se suportar seed, ainda assim produz amostras
+    diferentes por causa da temperatura).
 
     Com k_autoconsistencia == 1 (congelado, ver config.yaml) e exatamente
     uma chamada, igual ao comportamento anterior. Com k > 1, faz k chamadas
@@ -479,9 +493,9 @@ def extrair_com_prompt(client: OpenAI, system_prompt: str, abstract_texto: str) 
     nao votam, mas o quorum continua calculado sobre as k pedidas."""
     k = LLM_CFG["k_autoconsistencia"]
     if k == 1:
-        return _extrair_uma_amostra(client, system_prompt, abstract_texto) or []
+        return _extrair_uma_amostra(client, system_prompt, abstract_texto, seed=seed) or []
 
-    amostras = [_extrair_uma_amostra(client, system_prompt, abstract_texto) for _ in range(k)]
+    amostras = [_extrair_uma_amostra(client, system_prompt, abstract_texto, seed=seed) for _ in range(k)]
     validas = [a for a in amostras if a is not None]
     if not validas:
         return []
@@ -489,10 +503,11 @@ def extrair_com_prompt(client: OpenAI, system_prompt: str, abstract_texto: str) 
 
 
 def rodar_prompt_sobre_abstracts(client: OpenAI, system_prompt: str,
-                                   abstracts: dict, saida: Path) -> None:
+                                   abstracts: dict, saida: Path, seed: int = None) -> None:
     """Roda system_prompt sobre cada abstract em `abstracts` (dict
     doc_id->texto) e grava incrementalmente em `saida` (.jsonl, uma linha
-    por doc_id), de forma retomavel (pula doc_id ja presentes em `saida`)."""
+    por doc_id), de forma retomavel (pula doc_id ja presentes em `saida`).
+    `seed` (opcional): repassado a extrair_com_prompt em toda chamada."""
     saida.parent.mkdir(parents=True, exist_ok=True)
 
     feitos = set()
@@ -506,7 +521,7 @@ def rodar_prompt_sobre_abstracts(client: OpenAI, system_prompt: str,
         for doc_id, texto in abstracts.items():
             if doc_id in feitos:
                 continue
-            extracoes = extrair_com_prompt(client, system_prompt, texto)
+            extracoes = extrair_com_prompt(client, system_prompt, texto, seed=seed)
             linha = {"doc_id": doc_id, "extracoes": extracoes}
             f.write(json.dumps(linha, ensure_ascii=False) + "\n")
             f.flush()
