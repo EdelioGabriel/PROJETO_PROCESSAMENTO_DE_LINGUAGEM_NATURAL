@@ -21,10 +21,10 @@ _env_carregado = False
 
 
 def carregar_env() -> None:
-    """Le o .env da raiz do repositorio. Idempotente."""
+    """Le o .env de chave/chave.env, na raiz do repositorio. Idempotente."""
     global _env_carregado
     if not _env_carregado:
-        load_dotenv(RAIZ / ".env")
+        load_dotenv(RAIZ / "chave" / "chave.env")
         _env_carregado = True
 
 
