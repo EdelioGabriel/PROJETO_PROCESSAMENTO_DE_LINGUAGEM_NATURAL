@@ -1,0 +1,141 @@
+# Lexico de terras raras (F1-02).
+#
+# Cada termo carrega o `entity_type` do schema, o que permite derivar esse
+# campo deterministicamente a partir de `target_entity` em vez de anota-lo a
+# mao (decisao do plano de 14 dias). O anotador so corrige quando a derivacao
+# erra, e a correcao fica registrada.
+#
+# `variantes` sao formas que aparecem no texto e devem casar com o mesmo termo
+# canonico. A busca e feita com fronteira de palavra e sem distincao de caixa,
+# exceto para as siglas listadas em `sensivel_a_caixa`.
+
+# Siglas que so valem em maiuscula. "REE" minusculo casa com "ree" dentro de
+# palavras hifenizadas quebradas ("deg ree") e com o sobrenome Rees.
+sensivel_a_caixa: [REE, REEs, TREO, TREE, REO, LREE, HREE, MREE, REY, Y, Sc, La, Ce,
+                   Pr, Nd, Pm, Sm, Eu, Gd, Tb, Dy, Ho, Er, Tm, Yb, Lu]
+
+elementos:
+  entity_type: element
+  termos:
+    - {canonico: La, nome: lanthanum, variantes: [lanthanum, lanthane]}
+    - {canonico: Ce, nome: cerium, variantes: [cerium]}
+    - {canonico: Pr, nome: praseodymium, variantes: [praseodymium]}
+    - {canonico: Nd, nome: neodymium, variantes: [neodymium]}
+    - {canonico: Pm, nome: promethium, variantes: [promethium]}
+    - {canonico: Sm, nome: samarium, variantes: [samarium]}
+    - {canonico: Eu, nome: europium, variantes: [europium]}
+    - {canonico: Gd, nome: gadolinium, variantes: [gadolinium]}
+    - {canonico: Tb, nome: terbium, variantes: [terbium]}
+    - {canonico: Dy, nome: dysprosium, variantes: [dysprosium]}
+    - {canonico: Ho, nome: holmium, variantes: [holmium]}
+    - {canonico: Er, nome: erbium, variantes: [erbium]}
+    - {canonico: Tm, nome: thulium, variantes: [thulium]}
+    - {canonico: Yb, nome: ytterbium, variantes: [ytterbium]}
+    - {canonico: Lu, nome: lutetium, variantes: [lutetium, lutecium]}
+    - {canonico: Y, nome: yttrium, variantes: [yttrium]}
+    - {canonico: Sc, nome: scandium, variantes: [scandium]}
+
+grupos:
+  entity_type: element_group
+  termos:
+    - {canonico: REE, nome: rare earth elements,
+       variantes: [rare earth element, rare-earth element, rare earths,
+                   rare-earths, rare earth, rare-earth, "rare\u2010earth",
+                   "rare\u2011earth", "rare\u2010earth element",
+                   "rare\u2011earth element", REEs, lanthanide,
+                   lanthanides, lanthanoid, lanthanoids]}
+    - {canonico: LREE, nome: light rare earth elements,
+       variantes: [light rare earth, light REE, LREEs, light rare-earth]}
+    - {canonico: HREE, nome: heavy rare earth elements,
+       variantes: [heavy rare earth, heavy REE, HREEs, heavy rare-earth]}
+    - {canonico: MREE, nome: medium rare earth elements,
+       variantes: [middle rare earth, medium rare earth, MREEs]}
+    - {canonico: TREE, nome: total rare earth elements,
+       variantes: [total rare earth element, total REE, total REEs, TREEs, "\u03a3REE", "\u2211REE",
+                   sum of REE]}
+    - {canonico: REY, nome: rare earth elements and yttrium,
+       variantes: [REY, REYs, REE+Y, REE + Y, "rare earth elements and yttrium",
+                   "rare-earth elements and yttrium"]}
+
+oxidos:
+  entity_type: oxide
+  termos:
+    - {canonico: TREO, nome: total rare earth oxide,
+       variantes: [total rare earth oxide, total REO, "\u03a3REO", "\u2211REO",
+                   "REE2O3", "\u03a3REE2O3", "\u2211REE2O3"]}
+    - {canonico: REO, nome: rare earth oxide, variantes: [rare earth oxide, REOs]}
+    - {canonico: La2O3, nome: lanthanum oxide, variantes: ["La2O3", "La\u2082O\u2083"]}
+    - {canonico: CeO2, nome: cerium dioxide, variantes: ["CeO2", "CeO\u2082", ceria]}
+    - {canonico: Pr6O11, nome: praseodymium oxide, variantes: ["Pr6O11", "Pr\u2086O\u2081\u2081"]}
+    - {canonico: Nd2O3, nome: neodymium oxide, variantes: ["Nd2O3", "Nd\u2082O\u2083"]}
+    - {canonico: Sm2O3, nome: samarium oxide, variantes: ["Sm2O3", "Sm\u2082O\u2083"]}
+    - {canonico: Eu2O3, nome: europium oxide, variantes: ["Eu2O3", "Eu\u2082O\u2083"]}
+    - {canonico: Gd2O3, nome: gadolinium oxide, variantes: ["Gd2O3", "Gd\u2082O\u2083"]}
+    - {canonico: Tb4O7, nome: terbium oxide, variantes: ["Tb4O7", "Tb\u2084O\u2087"]}
+    - {canonico: Dy2O3, nome: dysprosium oxide, variantes: ["Dy2O3", "Dy\u2082O\u2083"]}
+    - {canonico: Y2O3, nome: yttrium oxide, variantes: ["Y2O3", "Y\u2082O\u2083", yttria]}
+    - {canonico: Sc2O3, nome: scandium oxide, variantes: ["Sc2O3", "Sc\u2082O\u2083", scandia]}
+    # Decisao 3 do guia: ThO2 e U3O8 sao anotados como Individual Entity
+    # Concentration. O guia dizia que o lexico ja os continha; nao continha.
+    - {canonico: ThO2, nome: thorium dioxide, variantes: ["ThO2", "ThO\u2082", thoria]}
+    - {canonico: U3O8, nome: triuranium octoxide, variantes: ["U3O8", "U\u2083O\u2088"]}
+
+minerais:
+  entity_type: mineral
+  termos:
+    - {canonico: bastnasite, nome: bastnasite,
+       variantes: [bastnasite, bastnaesite, "bastn\u00e4site", bastnaesita]}
+    - {canonico: monazite, nome: monazite, variantes: [monazite, monazita]}
+    - {canonico: xenotime, nome: xenotime, variantes: [xenotime, xenotima]}
+    - {canonico: allanite, nome: allanite, variantes: [allanite, allanita]}
+    - {canonico: eudialyte, nome: eudialyte, variantes: [eudialyte, eudialite]}
+    - {canonico: loparite, nome: loparite, variantes: [loparite]}
+    - {canonico: apatite, nome: apatite, variantes: [apatite, fluorapatite]}
+    - {canonico: zircon, nome: zircon, variantes: [zircon]}
+    - {canonico: parisite, nome: parisite, variantes: [parisite]}
+    - {canonico: synchysite, nome: synchysite, variantes: [synchysite]}
+    - {canonico: fergusonite, nome: fergusonite, variantes: [fergusonite]}
+    - {canonico: gadolinite, nome: gadolinite, variantes: [gadolinite]}
+
+# Entidades materiais: nao sao `target_entity`, mas indicam que o resumo trata
+# de teor em material, e por isso entram na peneira da F1-03.
+materiais:
+  entity_type: other
+  termos:
+    - {canonico: ion_adsorption_clay, nome: ion-adsorption clay,
+       variantes: [ion-adsorption clay, ion adsorption clay, ionic clay,
+                   weathered crust elution-deposited]}
+    - {canonico: carbonatite, nome: carbonatite, variantes: [carbonatite]}
+    - {canonico: laterite, nome: laterite, variantes: [laterite, lateritic]}
+    - {canonico: tailings, nome: tailings, variantes: [tailings, tailing]}
+    - {canonico: red_mud, nome: red mud, variantes: [red mud, bauxite residue]}
+    - {canonico: coal_ash, nome: coal ash,
+       variantes: [coal ash, fly ash, coal fly ash, coal combustion residue]}
+    - {canonico: phosphogypsum, nome: phosphogypsum,
+       variantes: [phosphogypsum, phosphate rock]}
+    - {canonico: magnet_scrap, nome: permanent magnet scrap,
+       variantes: [magnet scrap, NdFeB, permanent magnet, spent magnet]}
+    - {canonico: e_waste, nome: electronic waste,
+       variantes: [electronic waste, e-waste, WEEE]}
+
+# Termos de metrica de processo. Servem a estratificacao da F2-07 e ajudam o
+# `metric_type` = Process Metric.
+processo:
+  termos: [recovery, leaching, leachability, extraction efficiency,
+           selectivity, separation factor, desorption, adsorption capacity,
+           beneficiation, flotation, roasting]
+
+# Unidades aceitas pela peneira (F1-03).
+unidades:
+  massa_por_massa: [ppm, ppb, "%", "wt%", "wt.%", "g/t", "mg/kg", "kg/t", "\u03bcg/g", "ug/g"]
+  # Concentracao de solucao: sempre Process Metric, nunca conversivel para
+  # teor de solido sem densidade.
+  solucao: ["mg/L", "g/L", "mol/L", "M"]
+
+# Termos que indicam homonimia da sigla REE e devem levar o documento a
+# revisao na purificacao (F0-05/F0-06).
+homonimos:
+  - resting energy expenditure
+  - energy expenditure
+  - basal metabolic rate
+  - indirect calorimetry
