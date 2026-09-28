@@ -19,7 +19,7 @@ A,B,C", um por algoritmo). Duas diferencas do original:
 
 Le (o que existir):
     results/test/<prompt>_s<semente>.jsonl      bracos no teste
-    results/val/b_regras_s0.jsonl               B no val (opcional, fig 1 e 5)
+    results/val/<prompt>_s<semente>.jsonl        A, B e C no val (fig 1 e 5)
     results/protegi/c_protegi/candidatos.json   trajetoria do ProTeGi
     data/gold/piloto_r1.jsonl, piloto_r2.jsonl  teto do anotador (opcional)
 
@@ -214,12 +214,20 @@ def avaliar_anotador() -> dict | None:
     }
 
 
-def nota_val_b_regras() -> float | None:
-    caminho = RESULTADOS / "val" / "b_regras_s0.jsonl"
-    if not caminho.exists():
+def nota_val_braco(prompt: str) -> float | None:
+    """Nota no val (mesma formula e mesmo pipeline do teste): media das
+    sementes em results/val/<prompt>_s<seed>.jsonl, geradas por
+    `rodar_bracos.py --tambem-validacao <prompt>`. None se nao existir nenhuma."""
+    arquivos = [RESULTADOS / "val" / f"{prompt}_s{s}.jsonl" for s in SEMENTES]
+    arquivos = [a for a in arquivos if a.exists()]
+    if not arquivos:
         return None
     gold = carregar_gold("val")
-    return nota_media(gold, carregar_previsto(caminho, gold))
+    return statistics.mean(nota_media(gold, carregar_previsto(a, gold)) for a in arquivos)
+
+
+def nota_val_b_regras() -> float | None:
+    return nota_val_braco("b_regras")
 
 
 # ---------------------------------------------------------------------
@@ -443,10 +451,21 @@ def main() -> int:
         fig_kappa(resultados, anotador)
         fig_confusao(resultados)
     if protegi and resultados:
-        val = {"A": protegi["candidatas"][0]["nota_val"],
-               "C": protegi["candidatas"][protegi["melhor"]]["nota_val"]}
-        if val_b is not None:
-            val["B"] = val_b
+        # preferencia: nota do val recalculada com o MESMO pipeline/formula do
+        # teste (results/val/*.jsonl). Fallback: nota_val do candidatos.json,
+        # que e so F1 de deteccao com a extracao simples do apo.py -- nao e
+        # diretamente comparavel com a nota do teste.
+        val = {}
+        fallback = {"A": protegi["candidatas"][0]["nota_val"],
+                    "C": protegi["candidatas"][protegi["melhor"]]["nota_val"]}
+        for b, prompt, _ in BRACOS:
+            v = nota_val_braco(prompt)
+            if v is not None:
+                val[b] = v
+            elif b in fallback:
+                val[b] = fallback[b]
+                print(f"[aviso] {b}: sem results/val/{prompt}_s*.jsonl; fig5 usa nota_val do "
+                      f"candidatos.json (F1 de deteccao, extracao simples) -- nao comparavel com o teste.")
         fig_val_teste(val, resultados)
 
     linhas = [linha_tex(b, resultados[b]) for b in chaves]

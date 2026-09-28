@@ -24,7 +24,7 @@ e o unico gancho que extrair() expoe pra isolar repeticoes de fora.
 
 Convencao de saida esperada por analisar.py:
     <output-dir>/test/<rotulo>_s<seed>.jsonl   para seed em 0, 1, 2
-    <output-dir>/val/<rotulo>_s0.jsonl         so para bracos com --tambem-validacao
+    <output-dir>/val/<rotulo>_s<seed>.jsonl    para seed em 0, 1, 2, so para bracos com --tambem-validacao
 
 `rotulo` e o nome usado em BRACOS/RESULTADOS no analisar.py (ex.
 "v00_ingenuo", "b_regras", "c_protegi"). A e C normalmente NAO precisam de
@@ -45,7 +45,13 @@ Layout de projeto esperado (RAIZ = pasta acima de scripts/):
 
 Uso tipico:
 
-    python rodar_bracos.py --gold ../gold_standard/gold_final.jsonl --candidatos ../data/candidatos.jsonl --resumos-extra ../data/TERRAS_RARAS.csv --output-dir ../outputs/output_apo_oficial_hpc/results --braco v00_ingenuo=../prompts/v00_ingenuo.txt --braco c_protegi=../outputs/output_apo_oficial_hpc/prompt_final.txt
+    python rodar_bracos.py \\
+        --gold ../gold_standard/gold_final.jsonl \\
+        --candidatos ../data/candidatos.jsonl \\
+        --resumos-extra ../data/TERRAS_RARAS.csv \\
+        --output-dir ../outputs/results \\
+        --braco v00_ingenuo=../outputs/output_apo_oficial/v00_ingenuo.txt \\
+        --braco c_protegi=../outputs/output_apo_oficial/prompt_final.txt
 
 Com o Braco B tambem na validacao:
 
@@ -117,10 +123,11 @@ def rodar_braco_teste(rotulo: str, prompt_path: Path, abstracts_teste: dict,
 def rodar_braco_validacao(rotulo: str, prompt_path: Path, abstracts_val: dict,
                            gold_val: dict, saida_dir: Path, lex: Lexico) -> None:
     prompt_texto = prompt_path.read_text(encoding="utf-8")
-    saida = saida_dir / "val" / f"{rotulo}_s0.jsonl"
-    cache_dir = RAIZ / "cache" / "sementes" / "s0"
-    _rodar_e_avaliar(prompt_texto, lex, abstracts_val, gold_val, saida, cache_dir,
-                      rotulo_print=f"{rotulo} | validacao (1 semente, sem replicacao)")
+    for s in SEMENTES:
+        saida = saida_dir / "val" / f"{rotulo}_s{s}.jsonl"
+        cache_dir = RAIZ / "cache" / "sementes" / f"s{s}"
+        _rodar_e_avaliar(prompt_texto, lex, abstracts_val, gold_val, saida, cache_dir,
+                          rotulo_print=f"{rotulo} | validacao | seed={s}")
 
 
 def _parse_bracos(pares: list) -> dict:
@@ -146,7 +153,7 @@ def main():
                      help="rotulo=caminho_do_prompt.txt, repetivel.")
     ap.add_argument("--tambem-validacao", action="append", default=[], dest="tambem_validacao",
                      metavar="ROTULO",
-                     help="Rotulo(s) que tambem devem rodar 1x (sem replicacao) na validacao "
+                     help="Rotulo(s) que tambem devem rodar 1x  na validacao "
                           "-- tipicamente so o Braco B. Repetivel.")
     args = ap.parse_args()
 
@@ -173,7 +180,7 @@ def main():
     saida_dir = Path(args.output_dir)
     print(f"\nBracos a rodar: {list(bracos)} | teste={len(abstracts_teste)} abstracts, "
           f"{len(SEMENTES)} semente(s) cada | validacao (so {args.tambem_validacao or 'nenhum'}): "
-          f"{len(abstracts_val)} abstracts, 1 semente")
+          f"{len(abstracts_val)} abstracts, {len(SEMENTES)} semente(s) cada")
 
     for rotulo, prompt_path in bracos.items():
         if not prompt_path.exists():
